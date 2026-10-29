@@ -17,12 +17,16 @@ export async function initGPU() {
   const req = {}
   for (const k of ['maxBufferSize', 'maxStorageBufferBindingSize', 'maxComputeInvocationsPerWorkgroup', 'maxStorageBuffersPerShaderStage',
     'maxStorageBuffersInFragmentStage', 'maxStorageBuffersInVertexStage', 'maxTextureDimension2D']) if (k in ad.limits) req[k] = ad.limits[k]
-  let sub = ad.features.has('subgroups')
-  const dev = await ad.requestDevice({ requiredFeatures: sub ? ['subgroups'] : [], requiredLimits: req })
+  const q = new URLSearchParams(location.search)      // ?test=prof: timestamps; &nosub: without subgroups
+  let sub = ad.features.has('subgroups') && !q.has('nosub')
+  const feats = [...(sub ? ['subgroups'] : []), ...(q.get('test') === 'prof' && ad.features.has('timestamp-query') ? ['timestamp-query'] : [])]
+  const dev = await ad.requestDevice({ requiredFeatures: feats, requiredLimits: req })
   dev.lost.then(i => console.error('GPU device lost', i.message))
   dev.addEventListener('uncapturederror', e => console.error('WebGPU:', e.error.message))
   G.dev = dev; G.q = dev.queue; G.limits = dev.limits
   G.format = navigator.gpu.getPreferredCanvasFormat()
+  // 1x1 stand-in for textures that are only made when first needed
+  G.dummy = dev.createTexture({ size: [1, 1], format: 'rgba8unorm', usage: TU.TEXTURE_BINDING | TU.STORAGE_BINDING })
 
   // shader sections: "//// name deps..."
   const src = await (await fetch('shaders.wgsl')).text()
@@ -225,7 +229,7 @@ export class Surface {
     const tex = (format, m, extra = 0) => G.dev.createTexture({ size: [this.w, this.h], format, mipLevelCount: m, usage: TU.STORAGE_BINDING | TU.TEXTURE_BINDING | extra })
     this.ground = tex('rgba16float', 1, TU.COPY_SRC)
     this.color = tex('rgba8unorm', mips); this.nrm = tex('rgba16float', mips)
-    this.prev = tex('rgba8unorm', 1, TU.RENDER_ATTACHMENT)
+    this.prev = null       // drying preview, made on first use
     this.mips = mips
     const gesso = [0.80, 0.85, 0.87, 0.88, 0.88, 0.88, 0.875, 0.87]
     this.su = buf(64, BU.UNIFORM | BU.COPY_DST, new Float32Array([this.w, this.h, this.tilesX, this.tilesY, this.toothAmp, kind, 0, 0, ...gesso]))
@@ -241,6 +245,11 @@ export class Surface {
     const nb = buf(cap * TB)
     if (this.pool) { if (enc && this.used) enc.copyBufferToBuffer(this.pool, 0, nb, 0, this.used * TB); Engine.trash.push(this.pool) }
     this.pool = nb; this.cap = cap; this.bgs = {}
+  }
+  ensurePrev() {
+    if (this.prev) return
+    this.prev = G.dev.createTexture({ size: [this.w, this.h], format: 'rgba8unorm', usage: TU.STORAGE_BINDING | TU.TEXTURE_BINDING | TU.RENDER_ATTACHMENT })
+    this.drawBG = null; this.bgs.dry = null
   }
   bgSurf() { return this.bgs.surf ||= bg(L.surf, [this.pool, this.pt, this.su, this.ground.createView()]) }
   toTexel(p) { return [(p[0] - this.origin[0]) * PPM, (p[1] - this.origin[1]) * PPM] }
@@ -373,6 +382,7 @@ export class Brush {
   simulate(s, moved, out) {
     const n = this.n, A = this.axis, E1 = this.e1, E2 = this.e2, Fr = this.ferrule, LEN = this.length, W = this.width, knife = this.knife
     const tip = this.tip, eq = this.eq, root = this.root, touching = this.touching
+    this.moved = true
     let mlx = 0, mly = 0, nt = 0
     // free bristles converge to the tip; pressing flattens the belly and fans them out
     const pressFan = Math.min(Math.max((0.35 - (Fr[2] + A[2] * LEN)) / (LEN * Math.abs(A[2]) * 0.5), 0), 1)
@@ -688,9 +698,7 @@ export class Engine {
     this.tubes = []
     this.active = 0
     this.pigBuf = buf(304 * 4, BU.UNIFORM, pigmentTable())
-    this.fpTex = G.dev.createTexture({ size: [FPMAX, FPMAX], format: 'rgba32float', usage: TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING })
-    this.fpDepth = G.dev.createTexture({ size: [FPMAX, FPMAX], format: 'depth32float', usage: TU.RENDER_ATTACHMENT })
-    this.fpView = this.fpTex.createView(); this.fpDepthView = this.fpDepth.createView()
+    this.fps = {}          // footprint targets by size (128, 256, FPMAX): a small brush doesn't clear a big one every substep
     // per-frame arena for bristle records and kernel parameters (uploaded once before submit)
     this.arenaCap = 32 << 20
     this.arenaAB = new ArrayBuffer(this.arenaCap)
@@ -699,13 +707,15 @@ export class Engine {
     this.arenaOff = 0
     this._enc = null
     // sim tuning
+    // substeps: at least every `step` mm, scaled by `coarse` (1 = fastest, smaller is finer), and every `tick` s of sample time
+    Object.assign(this, { step: 0.1, coarse: 0.45, tick: 0.008 })
     Object.assign(this, { alpha: 0.7, rho: 0.75, ratePass: 0.75, mixPass: 0.35, eps: 3.5, feed: 0.5, wick: 0.004, groove: 9, conform: 1.1, coat: 0.7, film: 12, sinkRep: 0.8, relief: 1.0 })
     this.medium = 0                      // 0 oil, 1 acrylic, 2 gouache
     this._dullDry = true
     // input / history
     this.cur = null; this.lastSample = null; this.undoRec = null
     this.undoStack = []; this.redoStack = []; this.history = []; this.redoOps = []
-    this.undoBudget = 1.5e9
+    this.undoBudget = Math.min(1.5e9, Math.max(2.5e8, (navigator.deviceMemory || 8) * 1.25e8))     // GPU memory for undo
     this.onChange = null
 
     this.surfaces.push(Engine.makeCanvas(400, 300, 0))
@@ -877,14 +887,14 @@ export class Engine {
 
   // ------------------------------------------------ brush strokes
   strokeTo(b, s) {
-    const STEP = 0.1, COARSE = 0.45
+    const STEP = this.step, COARSE = this.coarse
     const l = this.lastSample
     if (!l) { this.lastSample = s; b.hover(); this.substep(b, s, 0); return }
     const d = Math.hypot(s.x - l.x, s.y - l.y), dt = Math.max(s.t - l.t, 0)
     // transfer is normalized by distance moved, so a substep only has to be short relative to the bristles'
     // contact (and sideways, relative to a bristle's thickness, so slanted bristles don't stamp)
     const step = b.pencil ? 0.4 : b.foot > 0 ? Math.min(Math.max(STEP, COARSE * Math.min(0.25 * b.foot, 3 * b.tuftR / Math.max(b.slant, 0.3))), 1.2 * COARSE) : 1.0
-    const n = Math.min(Math.max(Math.ceil(d / step), Math.ceil(dt / 0.008), 1), 600)
+    const n = Math.min(Math.max(Math.ceil(d / step), Math.ceil(dt / this.tick), 1), 600)
     for (let k = 1; k <= n; k++) {
       const f = k / n, m = {}
       for (const key of ['x', 'y', 'p', 'tx', 'ty', 'roll', 't']) m[key] = l[key] + (s[key] - l[key]) * f
@@ -946,10 +956,10 @@ export class Engine {
       this.sinkRep, gr, b.knife ? 0.5 : (this.history.length % 997) * 0.731, 0, ...sf.hole])
     const apo = this.params([b.n, 1 - Math.pow(1 - this.feed, Math.max(moved, 0.02)), 1 - Math.pow(1 - this.wick, Math.max(moved, 0.02)), 0, b.nz, 0, 0, 0])
 
-    const e = this.enc()
+    const e = this.enc(), fp = this.footprint(w <= 128 && h <= 128 ? 128 : w <= 256 && h <= 256 ? 256 : FPMAX)
     const rp = e.beginRenderPass({
-      colorAttachments: [{ view: this.fpView, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, -1, 0] }],
-      depthStencilAttachment: { view: this.fpDepthView, depthLoadOp: 'clear', depthStoreOp: 'discard', depthClearValue: 1 },
+      colorAttachments: [{ view: fp.view, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, -1, 0] }],
+      depthStencilAttachment: { view: fp.depth, depthLoadOp: 'clear', depthStoreOp: 'discard', depthClearValue: 1 },
     })
     rp.setViewport(0, 0, w, h, 0, 1)
     rp.setScissorRect(0, 0, w, h)
@@ -961,16 +971,26 @@ export class Engine {
     rp.end()
 
     b.bgs ||= {}
-    b.bgs.transfer ||= bg(L.transfer, [this.fpView, b.res, b.capBuf, b.dres, { buffer: this.arena, size: 112 }])
+    const tk = 'transfer' + fp.n
+    b.bgs[tk] ||= bg(L.transfer, [fp.view, b.res, b.capBuf, b.dres, { buffer: this.arena, size: 112 }])
     b.bgs.apply ||= bg(L.apply, [b.res, b.dres, b.capBuf, { buffer: this.arena, size: 32 }, b.zoneBuf, b.flow])
     const cp = e.beginComputePass()
     cp.setPipeline(G.P.transfer)
-    cp.setBindGroup(0, b.bgs.transfer, [spo]); cp.setBindGroup(1, sf.bgSurf())
+    cp.setBindGroup(0, b.bgs[tk], [spo]); cp.setBindGroup(1, sf.bgSurf())
     cp.dispatchWorkgroups(Math.ceil(w / 16), Math.ceil(h / 16))
     cp.setPipeline(G.P.apply)
     cp.setBindGroup(0, b.bgs.apply, [apo])
     cp.dispatchWorkgroups(1)
     cp.end()
+  }
+
+  footprint(n) {
+    if (!this.fps[n]) {
+      const t = G.dev.createTexture({ size: [n, n], format: 'rgba32float', usage: TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING })
+      const d = G.dev.createTexture({ size: [n, n], format: 'depth32float', usage: TU.RENDER_ATTACHMENT })
+      this.fps[n] = { n, view: t.createView(), depth: d.createView() }
+    }
+    return this.fps[n]
   }
 
   // graphite: the point sweeps a capsule from its last position, catching the tops of the weave under light pressure
@@ -1035,12 +1055,15 @@ export class Engine {
   }
   dryKernel(s, p) {
     if (!s.used) return
-    s.bgs.dry ||= bg(L.dry, [this.pigBuf, { buffer: this.arena, size: 16 }, { buffer: this.arena, size: 65536 }, s.prev.createView()])
+    // applying writes no preview, so it doesn't need the preview texture
+    const k = s.prev ? 'dry' : 'dryApply'
+    s.bgs[k] ||= bg(L.dry, [this.pigBuf, { buffer: this.arena, size: 16 }, { buffer: this.arena, size: 65536 }, (s.prev || G.dummy).createView()])
     const o = this.params(p)
-    this.tileKernel(s, G.P.dry, s.tileOf, [s.bgSurf()], () => s.bgs.dry, [o])
+    this.tileKernel(s, G.P.dry, s.tileOf, [s.bgSurf()], () => s.bgs[k], [o])
   }
   preview(hours, palette) {
     for (const s of this.surfaces) if (s.kind === 0 || palette) {
+      s.ensurePrev()
       const p = this.enc().beginRenderPass({ colorAttachments: [{ view: s.prev.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] }] })
       p.end()
       this.dryKernel(s, this.dryParams(hours, false))
@@ -1101,7 +1124,7 @@ export class Engine {
     this.history = []; this.redoOps = []; this.undoStack = []; this.clearRedo()
   }
   flushAll() { for (const r of this.undoStack) this.freeRec(r); this.undoStack = []; this.clearRedo() }
-  destroySurface(s) { for (const b of [s.pool, s.pt, s.su]) Engine.trash.push(b); for (const t of [s.ground, s.color, s.nrm, s.prev]) t.destroy() }
+  destroySurface(s) { for (const b of [s.pool, s.pt, s.su]) Engine.trash.push(b); for (const t of [s.ground, s.color, s.nrm, s.prev]) t?.destroy() }
   resetAll() {
     for (const s of this.surfaces) {
       s.packed.clear()

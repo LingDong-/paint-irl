@@ -28,7 +28,7 @@ const now = () => (performance.now() - t0) / 1000
 const S = {
   mouseDown: false, ending: false, panning: false, spaceDown: false, palDrag: null, last: [0, 0],
   pressure: 0.5, tilt: [0.32, -0.32], roll: 0, rollMode: 0, lastMove: null, mousePressure: 0.5, tabletSeen: false,
-  curSample: null, lastAdd: 0, downTime: 0, dryHours: 24, dryPalette: false, previewDirty: false, dryPreview: false,
+  curSample: null, lastAdd: 0, redraw: true, downTime: 0, dryHours: 24, dryPalette: false, previewDirty: false, dryPreview: false,
   replay: null, cropMode: false, cropStart: null, cropSaved: null, fitted: false, edited: false, file: null,
 }
 const replaySpeeds = [1, 2, 4, 8, 16, 32, Infinity]
@@ -212,6 +212,7 @@ addEventListener('keydown', ev => {
   status()
 })
 addEventListener('keyup', ev => { if (ev.key === ' ') S.spaceDown = false })
+for (const t of ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'keydown', 'keyup', 'click', 'input', 'change']) addEventListener(t, () => { S.redraw = true }, true)
 addEventListener('beforeunload', e => { if (S.edited && !TEST) e.preventDefault() })
 eng.onChange = () => { S.edited = true }
 
@@ -394,8 +395,13 @@ function frame() {
   if (S.loading) return      // nothing to draw while a file is opening (and it would slow the opening down)
   if (inflight >= 2) return
   const dpr = devicePixelRatio, w = Math.max(1, Math.round(W() * dpr)), h = Math.max(1, Math.round(H() * dpr))
-  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; if (!S.userView) S.fitted = false }
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; if (!S.userView) S.fitted = false; S.redraw = true }
   if (!S.fitted && W() > 0) { fit(); S.fitted = true }
+  // draw only when something may have changed: input, painting, replay, or surfaces to redraw
+  const busy = S.redraw || S.mouseDown || S.ending || eng.cur || S.replay || (S.dryPreview && S.previewDirty) || eng._enc ||
+    eng.surfaces.some(s => s.dirty.x1 > s.dirty.x0 && s.dirty.y1 > s.dirty.y0)
+  if (!busy) return
+  S.redraw = false
   sc.time = now()
   stepReplay()
   if (S.mouseDown && now() - S.lastAdd > 0.012) {
@@ -470,9 +476,12 @@ async function runTest(name) {
   }
   const render = async (center, dist, w, h, file) => { sc.cam.center = center; sc.cam.dist = dist; await post(await sc.snapshot(w, h), file) }
   const T0 = performance.now()
-  if (name === 'scene') {
+  if (name === 'prof') {
+    await (await import('./tool/prof.js')).run({ eng, sc, G, Engine, P, pal, params, log: console.log, post })
+  } else if (name === 'scene') {
     await squeeze(0, [P(30, 150), P(55, 150)])
     await render([90, -45], 980, 1800, 1200, 'scene.png')
+    await render([-185, -158], 40, 1400, 1000, 'scene_close.png')        // canvas corner on the table, closest zoom
   } else if (name === 'strokes') {
     await squeeze(0, [P(30, 150), P(55, 150)]); await squeeze(7, [P(30, 120), P(50, 118)]); await squeeze(2, [P(30, 90), P(48, 92)]); await squeeze(6, [P(30, 60), P(46, 60)])
     // load round 12 with ultramarine

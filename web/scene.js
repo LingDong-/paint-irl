@@ -179,8 +179,10 @@ function tubeBody(left, seed) {
 const tubeShoulder = () => [...lathe(48, [[3.6, -6], [4.0, -5.5], [4.0, -1], [4.4, -0.5], [6.5, 1.8], [8.6, 4.2], [TUBE_R, 6.2]]), ...disk(24, 3.6, -6, false)]
 const tubeCap = () => [...lathe(64, [[6.4, -17], [6.9, -16.6], [7.0, -2], [6.6, -1.2]]), ...disk(32, 6.4, -17, false)]
 
+let meshIds = 0
 class Mesh {
   constructor(v) {
+    this.id = ++meshIds
     this.count = v.length
     const f = new Float32Array(Math.max(v.length, 1) * 8)
     v.forEach((x, i) => f.set(x, i * 8))
@@ -255,6 +257,7 @@ export class Scene {
     this.hideMode = 0          // held brush: 0 whole, 1 without handle, 2 hidden
     this.time = 0; this.debug = 0
     this.exportView = null
+    this.sigF = new Float32Array(1); this.sigU = new Uint32Array(this.sigF.buffer)
     this.lightDir = norm([-0.42, 0.52, 0.74])
     const dev = G.dev, L = G.L
     this.colorFormat = G.format.replace(/-srgb$/, '') + '-srgb'
@@ -270,15 +273,21 @@ export class Scene {
     this.objPipe = pipe('obj', [L.frameFull, L.mesh, L.objDraw], { cull: 'back' })
     this.hairPipe = pipe('hair', [L.frameFull, L.hair], { topo: 'triangle-strip' })
     this.shadowPipe = pipe('shadow', [L.frameOnly, L.mesh, L.objDraw], { shadow: true })
-    const st = () => dev.createTexture({ size: [4096, 4096], format: 'depth32float', usage: TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING })
-    this.shadowTex = st(); this.shadowHeld = st()
+    const st = n => dev.createTexture({ size: [n, n], format: 'depth32float', usage: TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING })
+    this.shadowTex = st(2048); this.shadowHeld = st(2048)
+    this.shadowSig = [NaN, NaN]        // what each shadow map holds; redrawn only when that changes
+    const noShadow = st(1)             // export: no shadows
     this.labels = makeLabels()
     this.frameBuf = buf(256, BU.UNIFORM | BU.COPY_DST)
     this.drawBuf = buf(256 * 256, BU.UNIFORM | BU.COPY_DST)
     this.drawAB = new Float32Array(64 * 256)
-    this.frameFull = bg(L.frameFull, [this.frameBuf, this.shadowTex.createView(), this.shadowHeld.createView(),
-      dev.createSampler({ compare: 'less-equal', magFilter: 'linear', minFilter: 'linear' }),
-      dev.createSampler({ magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear', maxAnisotropy: 8 }), this.labels.createView()])
+    const samplers = [dev.createSampler({ compare: 'less-equal', magFilter: 'linear', minFilter: 'linear' }),
+      dev.createSampler({ magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear', maxAnisotropy: 8 })]
+    this.frameFull = bg(L.frameFull, [this.frameBuf, this.shadowTex.createView(), this.shadowHeld.createView(), ...samplers, this.labels.createView()])
+    this.frameExport = bg(L.frameFull, [this.frameBuf, noShadow.createView(), noShadow.createView(), ...samplers, this.labels.createView()])
+    const e = dev.createCommandEncoder()
+    e.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: noShadow.createView(), depthLoadOp: 'clear', depthStoreOp: 'store', depthClearValue: 1 } }).end()
+    G.q.submit([e.finish()])
     this.frameOnly = bg(L.frameOnly, [this.frameBuf])
     this.drawBG = bg(L.objDraw, [{ buffer: this.drawBuf, size: 112 }])
     this.buildMeshes()
@@ -477,21 +486,30 @@ export class Scene {
   // encode shadows + the main pass into `enc`, drawing into the given MSAA/resolve/depth views
   encode(enc, target, aspect) {
     this.refreshTubes()
-    G.q.writeBuffer(this.frameBuf, 0, this.frameUniforms(aspect))
+    this.frameF = this.frameUniforms(aspect)
+    G.q.writeBuffer(this.frameBuf, 0, this.frameF)
     const list = this.exportView ? [] : this.drawList()
     list.forEach((d, i) => this.drawAB.set(d.d, i * 64))
     if (list.length) G.q.writeBuffer(this.drawBuf, 0, this.drawAB, 0, list.length * 64)
-    for (const [tex, held] of [[this.shadowTex, false], [this.shadowHeld, true]]) {
+    // shadow maps: the resting things and the held thing, each redrawn only when what casts into it moved
+    if (!this.exportView) [[this.shadowTex, false], [this.shadowHeld, true]].forEach(([tex, held], k) => {
+      const lvp = this.frameF.subarray(16, 32)
+      let h = 2166136261
+      const mix = f => { this.sigF[0] = f; h = Math.imul(h ^ this.sigU[0], 16777619) }
+      lvp.forEach(mix)
+      for (const d of list) if (d.shadow && d.isHeld === held) { mix(d.mesh.id); d.d.forEach(mix) }
+      if (h === this.shadowSig[k]) return
+      this.shadowSig[k] = h
       const p = enc.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: tex.createView(), depthLoadOp: 'clear', depthStoreOp: 'store', depthClearValue: 1 } })
       p.setPipeline(this.shadowPipe); p.setBindGroup(0, this.frameOnly)
       list.forEach((d, i) => { if (d.shadow && d.isHeld === held) { p.setBindGroup(1, d.mesh.bg); p.setBindGroup(2, this.drawBG, [i * 256]); p.draw(d.mesh.count) } })
       p.end()
-    }
+    })
     const p = enc.beginRenderPass({
       colorAttachments: [{ view: target.msaa, resolveTarget: target.resolve, loadOp: 'clear', storeOp: 'discard', clearValue: [0.1, 0.1, 0.1, 1] }],
       depthStencilAttachment: { view: target.depth, depthLoadOp: 'clear', depthStoreOp: 'discard', depthClearValue: 1 },
     })
-    p.setBindGroup(0, this.frameFull)
+    p.setBindGroup(0, this.exportView ? this.frameExport : this.frameFull)
     // objects
     p.setPipeline(this.objPipe)
     list.forEach((d, i) => { if (d.main) { p.setBindGroup(1, d.mesh.bg); p.setBindGroup(2, this.drawBG, [i * 256]); p.draw(d.mesh.count) } })
@@ -499,7 +517,8 @@ export class Scene {
     p.setPipeline(this.surfPipe)
     for (const s of this.eng.surfaces) {
       if (this.exportView && s.kind !== 0) continue
-      if (!s.sdBuf) { s.sdBuf = buf(64, BU.UNIFORM | BU.COPY_DST); s.drawBG = bg(G.L.surfDraw, [s.sdBuf, s.color.createView(), s.nrm.createView(), s.prev.createView()]) }
+      s.sdBuf ||= buf(64, BU.UNIFORM | BU.COPY_DST)
+      s.drawBG ||= bg(G.L.surfDraw, [s.sdBuf, s.color.createView(), s.nrm.createView(), (s.prev || G.dummy).createView()])
       G.q.writeBuffer(s.sdBuf, 0, new Float32Array([...s.origin, s.w, s.h, ...s.mask, s.z, s.maskR, s.kind, 0, ...s.hole]))
       p.setBindGroup(1, s.drawBG)
       p.draw(4)
@@ -509,10 +528,13 @@ export class Scene {
       p.setPipeline(this.hairPipe)
       this.eng.brushes.forEach((b, i) => {
         if (b.knife || b.pencil || (this.held.brush === i && this.hideMode === 2)) return
-        const n = this.hairs(b, this.hairAB, this.hairOff[i] / 4)
-        G.q.writeBuffer(this.hairBuf, this.hairOff[i], this.hairAB, this.hairOff[i] / 4, n * 16)
+        if (b.moved) {      // resting brushes keep their hairs
+          b.hairN = this.hairs(b, this.hairAB, this.hairOff[i] / 4)
+          G.q.writeBuffer(this.hairBuf, this.hairOff[i], this.hairAB, this.hairOff[i] / 4, b.hairN * 16)
+          b.moved = false
+        }
         p.setBindGroup(1, this.hairBG[i])
-        p.draw(22, n)
+        p.draw(22, b.hairN)
       })
     }
     p.end()

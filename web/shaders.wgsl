@@ -651,36 +651,35 @@ struct ObjDraw { model: mat4x4f, base: vec4f, mat: vec4f, extra: vec4f }   // ma
 @group(0) @binding(4) var sLin: sampler;
 @group(0) @binding(5) var labels: texture_2d<f32>;
 
-const POISSON = array<vec2f, 16>(vec2f(-0.94, -0.40), vec2f(0.95, -0.77), vec2f(-0.09, -0.93), vec2f(0.34, 0.29),
-    vec2f(-0.92, 0.46), vec2f(-0.38, -0.12), vec2f(0.48, -0.31), vec2f(0.12, 0.89), vec2f(0.65, 0.66), vec2f(-0.55, 0.81),
-    vec2f(0.79, 0.15), vec2f(-0.20, 0.40), vec2f(0.25, -0.60), vec2f(-0.70, -0.75), vec2f(0.0, 0.0), vec2f(0.92, -0.18));
-// soft shadows that harden near contact: the key light is a big window, so the penumbra grows with occluder distance
+// soft shadows that harden near contact: the key light is a big window, so the penumbra grows with occluder distance.
+// 8 blocker-search taps + 8 filtered taps on a golden-angle spiral, rotated per pixel. Radii are in 1/4096ths of the map
+// (the size the look was tuned at), so softness in mm doesn't depend on the map resolution.
+fn spiral(i: i32) -> vec2f { let a = f32(i) * 2.39996; return vec2f(cos(a), sin(a)) * sqrt((f32(i) + 0.5) / 8.0); }
 fn shadowAt(wp: vec3f, held: bool, bias: f32) -> f32 {
     let l = F.lvp * vec4f(wp, 1.0);
     let q = l.xyz / l.w;
     let uv = vec2f(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
     if (any(uv < vec2f(0.0)) || any(uv > vec2f(1.0))) { return 1.0; }
     let dim = vec2f(textureDimensions(shadowTex));
-    let ts = 1.0 / dim;
     let zr = q.z - bias;
     let a = h21(wp.xy * 7.3) * 6.2832;
     let rot = mat2x2f(cos(a), sin(a), -sin(a), cos(a));
     var sum = 0.0; var cnt = 0.0;
-    for (var i = 0; i < 16; i++) {
-        let c = vec2i(clamp((uv + rot * POISSON[i] * 48.0 * ts) * dim, vec2f(0.0), dim - 1.0));
+    for (var i = 0; i < 8; i++) {
+        let c = vec2i(clamp((uv + rot * spiral(i) * (48.0 / 4096.0)) * dim, vec2f(0.0), dim - 1.0));
         var d: f32;
         if (held) { d = textureLoad(shadowHeld, c, 0); } else { d = textureLoad(shadowTex, c, 0); }
         if (d < zr) { sum += d; cnt += 1.0; }
     }
     if (cnt == 0.0) { return 1.0; }
     let distMM = (zr - sum / cnt) * 2200.0;
-    let rad = clamp(distMM * 0.45, 1.5, 70.0);    // texels (~0.27 mm each)
+    let rad = clamp(distMM * 0.45, 1.5, 70.0) / 4096.0;
     var s = 0.0;
-    for (var i = 0; i < 16; i++) {
-        let u = uv + rot * POISSON[i] * rad * ts;
+    for (var i = 0; i < 8; i++) {
+        let u = uv + rot * spiral(i) * rad;
         if (held) { s += textureSampleCompareLevel(shadowHeld, sCmp, u, zr); } else { s += textureSampleCompareLevel(shadowTex, sCmp, u, zr); }
     }
-    s /= 16.0;
+    s /= 8.0;
     // light bounced around the room fills in shadows of things far above the surface
     return mix(s, 1.0, clamp(distMM / 220.0, 0.0, 1.0) * 0.5);
 }
