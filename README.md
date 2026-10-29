@@ -11,6 +11,8 @@ Currently works on macOS (Metal) and web (webgpu), see respective folders fo imp
 
 Caution: mostly vibe-coded, so don't look too hard inside. But seems to work well. Here're some paintings I'm making with it:
 
+The [peppers standard test image](https://sipi.usc.edu/database/database.php?volume=misc&image=13)
+
 ![](screenshots/010.gif)
 
 ![](screenshots/011.png)
