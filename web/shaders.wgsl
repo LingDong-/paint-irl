@@ -708,7 +708,8 @@ fn lit(N: vec3f, V: vec3f, alb: vec3f, metal: f32, rough: f32, sh: f32, ao: f32)
     var c = (diff / PI * 3.0 + spec) * F.lcol.rgb * nl * sh;
     let skyAmb = F.amb.rgb * (0.65 + 0.35 * N.z);
     c += diff * skyAmb * ao;
-    let Fe = f0 + (1.0 - f0) * pow(1.0 - nv, 5.0) * (1.0 - rough);
+    // nv goes up to 1.001: pow of a negative base is undefined (NaN, i.e. black pixels, on drivers that do exp2(y * log2(x)))
+    let Fe = f0 + (1.0 - f0) * pow(max(1.0 - nv, 0.0), 5.0) * (1.0 - rough);
     c += envCol(reflect(-V, N), rough) * Fe * ao * mix(1.0, sh, 0.5);
     return c;
 }
