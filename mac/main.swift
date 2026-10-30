@@ -850,6 +850,7 @@ extension PaintView: MTKViewDelegate {
         for a in pendingActions { a(cmd) }
         pendingActions.removeAll()
         stepReplay(cmd)
+        osc?.step(cmd)
         if mouseDown, now - lastAdd > 0.012, var s = curSample ?? Optional(sample(lastPt)) {
             // keep the brush working while held still
             s.t = now; s.p = pressure
@@ -909,6 +910,7 @@ final class HUD: NSObject {
             btn("crop", "Crop canvas", #selector(crop)), btn("doc.badge.plus", "New canvas…", #selector(newCanvas(_:))),
             btn("play", "Replay painting (click again or Esc to stop)", #selector(replay)), btn("square.and.arrow.down", "Save (⌘S) · Save As (⇧⌘S)", #selector(save)),
             btn("folder", "Open (⌘O)", #selector(open)), btn("photo", "Export PNG (⌘E)", #selector(export)),
+            btn("antenna.radiowaves.left.and.right", "OSC remote control", #selector(toggleOSC(_:))),
         ])
         row.spacing = 4
         drySlider.target = self; drySlider.action = #selector(dryChanged)
@@ -1050,6 +1052,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pv.onStatus = { [weak self] s in self?.hud.label.stringValue = s }
         pv.hud = hud
         pv.status()
+        OSC.launch(pv, hud)
         win.makeKeyAndOrderFront(nil)
         win.makeFirstResponder(pv)
         let menu = NSMenu(), item = NSMenuItem(); menu.addItem(item)

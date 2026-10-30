@@ -6,7 +6,7 @@ APP=build/PaintIRL.app
 mkdir -p $APP/Contents/MacOS $APP/Contents/Resources
 xcrun -sdk macosx metal -O3 -c shaders.metal -o build/shaders.air
 xcrun -sdk macosx metallib build/shaders.air -o $APP/Contents/Resources/shaders.metallib
-swiftc -O -target arm64-apple-macos14 -o $APP/Contents/MacOS/PaintIRL engine.swift scene.swift main.swift \
+swiftc -O -target arm64-apple-macos14 -o $APP/Contents/MacOS/PaintIRL engine.swift scene.swift main.swift osc.swift \
   -framework Metal -framework MetalKit -framework AppKit
 cat > $APP/Contents/Info.plist <<PL
 <?xml version="1.0" encoding="UTF-8"?>

@@ -16,3 +16,7 @@ The [peppers standard test image](https://sipi.usc.edu/database/database.php?vol
 ![](screenshots/010.gif)
 
 ![](screenshots/011.png)
+
+Now with OSC support! You can control the app from another software, much like how you send commands to a plotter, via OSC (Open Sound Control). See [mac/osc.swift](mac/osc.swift) comments.
+
+![](screenshots/101.png)

@@ -19,4 +19,6 @@ A thick-paint (oil / acrylic / gouache) painting simulator for macOS. Swift + Me
 
 **Simulation**: each texel holds amounts of 16 paint channels in a wet top film, a set under-layer and a dried layer; colour is computed with 8-band Kubelka–Munk. Brushes are a few hundred bristle tufts with friction, clumping and splay; paint moves both ways between tufts and canvas (film splitting, pickup, mixing), and tufts are fed from per-zone reservoirs.
 
+**OSC** (experimental, `osc.swift`): other programs can pick up tools and drive the pen (position, pressure, tilt, roll) over UDP on 127.0.0.1:9000, once switched on with the antenna button in the toolbar. Custom brushes (fingers, stamps, sponges, odd bristle layouts) are sent tuft by tuft. The command list is at the top of `osc.swift`; `tool/osc.py demo` / `brushes` paint small studies, and `PaintOSC/` is a Processing (oscP5) example.
+
 Headless test renders: `build/PaintIRL.app/Contents/MacOS/PaintIRL --test {swatch|strokes|brush|paint|dry|dull|save|savesize|replay|v2|scene|perf} out.png` (outputs in `tool/out/`).

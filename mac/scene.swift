@@ -444,7 +444,7 @@ final class Scene {
             if abs(pt.x - c.x) < 7.5, pt.y > c.y - 82, pt.y < c.y + 13 { return held == .tube(i) ? Held.none : .tube(i) }
         }
         let pb = hitPlane(r, TABLE_Z + 4)
-        for i in 0..<eng.brushes.count {
+        for i in 0..<brushMesh.count {        // brushes defined at runtime have no model to pick up
             let p = brushRestPos(i), b = eng.brushes[i]
             if abs(pb.x - p.x) < (b.knife ? 11 : 6.5), pb.y < p.y + b.length, pb.y > p.y - ferruleLen(b) - b.handleLen { return held == .brush(i) ? Held.none : .brush(i) }
         }
@@ -518,7 +518,7 @@ final class Scene {
             if inTray { add(meshes["cap"]!, model, V3(0.03, 0.03, 0.03), rough: 0.35, mode: 3) }
             else { add(meshes["cap"]!, tubeRest(i), V3(0.03, 0.03, 0.03), rough: 0.35, mode: 3) }
         }
-        for (i, b) in eng.brushes.enumerated() {
+        for (i, b) in eng.brushes.enumerated() where i < brushMesh.count {
             var fade: Float = 0, hide = 0
             if case .brush(let h) = held, h == i { fade = 140; hide = hideMode }
             let model = brushModel(b)
@@ -596,8 +596,9 @@ final class Scene {
         e.setRenderPipelineState(hairRPS)
         e.setVertexBytes(&F, length: MemoryLayout<Frame>.stride, index: 1)
         e.setFragmentBytes(&F, length: MemoryLayout<Frame>.stride, index: 1)
-        for (i, b) in eng.brushes.enumerated() where exportView == nil && !b.knife && !b.pencil {
+        for (i, b) in eng.brushes.enumerated() where exportView == nil && !b.knife && !b.pencil && (i < brushMesh.count || held == .brush(i)) {
             if case .brush(let h) = held, h == i, hideMode == 2 { continue }
+            if off + b.n * HPT * MemoryLayout<Hair>.stride > hb.length { continue }
             let ptr = (hb.contents() + off).bindMemory(to: Hair.self, capacity: b.n * HPT)
             let n = hairs(b, into: ptr)
             var base = V4(b.hairColor, 1)

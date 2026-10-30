@@ -266,6 +266,7 @@ final class Brush {
     let round: Bool
     let knife: Bool             // palette knife: a rigid blade, simulated as tightly packed stiff tufts
     let pencil: Bool            // graphite pencil: no bristles, marks the ground directly
+    var def: BrushDef?          // how a runtime-defined brush was made (saved with the painting)
     let width: Float, thick: Float, length: Float
     let n: Int
     let tuftR: Float
@@ -293,14 +294,17 @@ final class Brush {
 
     var lie = [Float](), pressJ = [Float]()
     var pressDepth: Float = 0.62     // how far full pressure pushes the bristles down, as a fraction of their length
+    var stiff: Float = 0             // defined bristles: 0 bend and drag like hair … 1 stay straight like a pad's tufts
 
-    init(name: String, round: Bool, width: Float, thick: Float, length: Float, n: Int, tuftR: Float, handle: V3, seed: UInt64, knife: Bool = false, pencil: Bool = false) {
+    init(name: String, round: Bool, width: Float, thick: Float, length: Float, n: Int, tuftR: Float, handle: V3, seed: UInt64, knife: Bool = false, pencil: Bool = false, tufts: [V4]? = nil) {
         self.name = name; self.round = round; self.width = width; self.thick = thick; self.length = length; self.n = n; self.tuftR = tuftR; self.knife = knife; self.pencil = pencil
         handleColor = handle; handleLen = knife ? 120 : (pencil ? 160 : 150 + width * 3); hairColor = V3(0.82, 0.70, 0.50); stiffness = knife ? 20 : 1
         var rng = Rng(s: seed)
         for i in 0..<n {
             var o: V2
-            if round {
+            if let t = tufts {          // given: x, y, length, radius
+                o = V2(t[i].x, t[i].y); lens.append(t[i].z)
+            } else if round {
                 let a = Float(i) * 2.39996323, r = sqrt((Float(i) + 0.5) / Float(n))
                 o = V2(cos(a), sin(a)) * r * width * 0.5 + V2(rng.gauss(), rng.gauss()) * 0.04 * width
                 let rf = simd_length(o) / (width * 0.5)
@@ -316,7 +320,7 @@ final class Brush {
             }
             offs.append(o)
             dirj.append(knife ? .zero : V2(rng.gauss(), rng.gauss()) * 0.006)
-            rads.append(tuftR * (0.85 + 0.3 * rng.next()))
+            rads.append(tufts?[i].w ?? tuftR * (0.85 + 0.3 * rng.next()))
         }
         tip = [V2](repeating: .zero, count: n); tipZ = [Float](repeating: 10, count: n)
         touching = [Bool](repeating: false, count: n); bendPt = tip; eq = tip; lastTip = tip
@@ -337,7 +341,7 @@ final class Brush {
         zoneBuf = g.dev.makeBuffer(bytes: zones, length: n * 4, options: .storageModeShared)!
         memset(res.contents(), 0, res.length); memset(dres.contents(), 0, dres.length)
         // paint the bundle can hold: ~30% of its volume (mm^3 -> unit*texel^2 is x1e4); a quarter sits on the tips
-        let vol = round ? Float.pi * width * width / 4 * length * 0.55 : width * thick * length * 0.7
+        let vol = round ? Float.pi * width * width / 4 * length * 0.55 : width * thick * max(length, 2) * 0.7     // (pads: at least 2 mm deep)
         let total = vol * 0.45 * 1e4
         capTuft = total * 0.25 / Float(n)
         let cp = cap.contents().bindMemory(to: Float.self, capacity: n + nz)
@@ -376,7 +380,7 @@ final class Brush {
 
     // place the brush: tips' rest centroid over `target` (surface-local mm), pressed by `pressure`
     func pose(target: V2, pressure: Float, tilt: V2, roll: Float) {
-        var tv = tilt
+        var tv = tilt * (1 - stiff)        // a rigid brush is pressed flat
         let tl = simd_length(tv); if tl > 0.85 { tv *= 0.85 / tl }
         axis = simd_normalize(V3(-tv.x, -tv.y, -sqrt(max(1 - simd_length_squared(tv), 0.05))))
         var r = V3(cos(roll), sin(roll), 0)
@@ -391,14 +395,14 @@ final class Brush {
         var meanLag = V2.zero, nt = 0
         // free bristles converge to the tip; pressing flattens the belly and fans them out
         let pressFan = min(max((0.35 - (ferrule.z + axis.z * length)) / (length * abs(axis.z) * 0.5), 0), 1)
-        let conv: Float = knife ? 0 : (round ? 0.82 : 0.15) * (1 - 0.8 * pressFan)
+        let conv: Float = knife ? 0 : (round ? 0.82 : 0.15) * (1 - 0.8 * pressFan) * (1 - stiff)
         for j in 0..<n {
-            let o = offs[j] + (clump[j] - offs[j]) * clumpiness
+            let o = offs[j] + (clump[j] - offs[j]) * clumpiness * (1 - stiff)
             let R = ferrule + e1 * o.x + e2 * o.y
             root[j] = R
             let off3 = e1 * o.x + e2 * o.y
             let L = lens[j]
-            let jt = dirj[j] + clumpJit[clumpOf[j]]
+            let jt = (dirj[j] + clumpJit[clumpOf[j]]) * (1 - stiff)
             let d = simd_normalize(axis * L - off3 * conv + (e1 * jt.x + e2 * jt.y) * L)
             let F = R + d * L
             if F.z >= 0 {
@@ -410,7 +414,7 @@ final class Brush {
             let ol = simd_length(outw)
             outw = ol > 1e-4 ? outw / ol : simd_normalize(dirj[j] + V2(1e-3, 0))
             let dxy = V2(d.x, d.y)
-            let splay: Float = knife ? 0 : (round ? 0.45 : 0.25) * (ol / max(width * 0.5, 0.1))
+            let splay: Float = knife ? 0 : (round ? 0.45 : 0.25) * (ol / max(width * 0.5, 0.1)) * (1 - stiff)
             var dh = dxy + outw * splay * c
             if simd_length(dh) < 1e-3 { dh = outw }
             dh = simd_normalize(dh)
@@ -418,12 +422,13 @@ final class Brush {
             // clumps and stray bristles wander sideways as they drag; edge bristles more
             let edge = min(ol / max(width * 0.5, 0.1), 1)
             let cw = noise1(travel * 0.45 + Float(clumpOf[j]) * 7.3, 1) - 0.5, tw = noise1(travel * 1.3 + Float(j) * 3.7, 2) - 0.5
-            let wander = knife ? 0 : cw * (0.12 + 0.35 * edge * edge) * c + tw * 0.08
-            let E = V2(R.x, R.y) + dh * reach + V2(-dh.y, dh.x) * wander
+            let wander = knife ? 0 : (cw * (0.12 + 0.35 * edge * edge) * c + tw * 0.08) * (1 - stiff)
+            // stiff bristles don't lie down: their tips stay nearer where the straight bristle would meet the surface
+            let E = simd_mix(V2(R.x, R.y) + dh * reach + V2(-dh.y, dh.x) * wander, V2(F.x, F.y), V2(repeating: stiff))
             eq[j] = E
             if !touching[j] { tip[j] = E; lastTip[j] = E } else {
                 let dd = tip[j] - E
-                let lag = 0.55 * min(c, 1) * L / stiffness
+                let lag = 0.55 * min(c, 1) * L / stiffness * (1 - stiff)
                 let dl = simd_length(dd)
                 if dl > lag { tip[j] = E + dd / dl * lag * 0.93 }
             }
@@ -446,9 +451,9 @@ final class Brush {
             let dl = simd_length(toRoot)
             let F = root[j] + simd_normalize(axis * L) * L
             let c = min(-F.z / max(L * abs(axis.z), 0.3), 1.6)
-            lie[j] = min(L * min(max(c * (knife ? 2.5 : 1.1), 0.04), 0.85), dl)
+            lie[j] = min(L * min(max(c * (knife ? 2.5 : 1.1), 0.04), 0.85), dl) * (1 - stiff)
             bendPt[j] = dl > 1e-5 ? tip[j] + toRoot / dl * lie[j] : tip[j]
-            pressJ[j] = min(c * (knife ? 8 : 1.6), 1)
+            pressJ[j] = min(c * (knife ? 8 : 1.6), 1) + (min(max(-F.z, 0), 1) - min(c * (knife ? 8 : 1.6), 1)) * stiff
             fs += lie[j] + 2 * rads[j]
         }
         foot = nt > 0 ? fs / Float(nt) : 0
@@ -470,7 +475,8 @@ final class Brush {
                 let u = (b - a) / max(simd_length(b - a), 1e-4), m = (tip[j] - lastTip[j]) / mv
                 let sn2 = u.x * m.y - u.y * m.x; sl += sn2 * sn2; sn += 1
             }
-            let rate = (max(mv, 0.25 * moved) + 0.002) / max(len + 2 * r, 0.25)
+            // transfer goes with distance moved; a stiff brush also transfers while just pressed (substeps come at least every 8 ms)
+            let rate = max((max(mv, 0.25 * moved) + 0.002) / max(len + 2 * r, 0.25), touching[j] ? 0.1 * stiff : 0)
             lastTip[j] = tip[j]
             let ta = s.toTexel(a), tb = s.toTexel(b), rt = r * PPM
             out[cnt] = BrG(seg: V4(ta.x, ta.y, tb.x, tb.y), p0: V4(rt, press, z, rate), p1: V4(2 * rads[j] * L * PPM * PPM, Float(j), 0, 0))
@@ -497,6 +503,8 @@ final class Tube {
 
 // ---------------------------------------------------------------- operations (history / replay)
 struct Sample: Codable { var x: Float; var y: Float; var p: Float; var tx: Float; var ty: Float; var roll: Float; var t: Float; var s: Int8 }
+// a brush defined at runtime (OSC): tufts as x, y, length, radius in mm; saved with the painting so its strokes replay
+struct BrushDef: Codable, Equatable { var name: String; var tufts: [Float]; var stiff: Float?; var stamp: Bool? = nil }     // stamp: early pads (= stiff 1)
 enum Op: Codable {
     case stroke(brush: Int, samples: [Sample])
     case squeeze(tube: Int, samples: [Sample])
@@ -534,6 +542,7 @@ final class Engine {
     var brushes: [Brush] = []
     var tubes: [Tube] = []
     var active = 0                      // active brush
+    var builtinBrushes = 0              // the rest were defined at runtime
     let pigBuf: MTLBuffer
     let fpTex: MTLTexture, fpDepth: MTLTexture
     let fpRPS: MTLRenderPipelineState
@@ -596,6 +605,7 @@ final class Engine {
         brushes.append(Brush(name: "Rigger 1", round: true, width: 1.2, thick: 1.2, length: 24, n: 50, tuftR: 0.07, handle: V3(0.12, 0.20, 0.12), seed: 1800))
         brushes.append(Brush(name: "Pencil HB", round: true, width: 0.6, thick: 0.6, length: 14, n: 1, tuftR: 0.3, handle: V3(0.06, 0.20, 0.12), seed: 1900, pencil: true))
         brushes[7].pressDepth = 0.35; brushes[8].pressDepth = 0.18; brushes[6].pressDepth = 0.1
+        builtinBrushes = brushes.count
         tubes = (0..<NPIG).map { Tube($0) }
         let cmd = g.q.makeCommandBuffer()!
         for s in surfaces { s.reset(cmd) }
@@ -612,6 +622,20 @@ final class Engine {
         surfaces[0] = c
         placePalette(palette.origin); paletteStart = palette.origin
         history = []; redoOps = []; undoStack = []; redoStack = []
+    }
+
+    // adds a runtime-defined brush (or finds the same one already there); returns its number
+    func addBrush(_ d: BrushDef) -> Int {
+        if let i = brushes.firstIndex(where: { $0.def == d }) { return i }
+        let t = stride(from: 0, to: d.tufts.count - 3, by: 4).map { V4(d.tufts[$0], d.tufts[$0 + 1], d.tufts[$0 + 2], d.tufts[$0 + 3]) }
+        let ex = t.reduce(V2.zero) { simd_max($0, simd_abs(V2($1.x, $1.y)) + $1.w) }
+        let top = t.map { $0.z }.max() ?? 1, relief = top - (t.map { $0.z }.min() ?? 0), k = min(max(d.stiff ?? (d.stamp == true ? 1 : 0), 0), 1)
+        let b = Brush(name: d.name, round: false, width: 2 * ex.x, thick: 2 * ex.y, length: top, n: t.count,
+                      tuftR: t.reduce(0) { $0 + $1.w } / Float(max(t.count, 1)), handle: V3(0.5, 0.5, 0.5), seed: UInt64(t.count) &* 2654435761, tufts: t)
+        // full pressure pushes soft bristles 62% of their length in, a rigid brush 0.6 mm past its relief (at least 2 mm)
+        b.pressDepth = (0.62 * top * (1 - k) + (max(relief, 2) + 0.6) * k) / top; b.stiff = k; b.def = d
+        brushes.append(b)
+        return brushes.count - 1
     }
 
     func resetAll(_ cmd: MTLCommandBuffer) {
@@ -1169,7 +1193,13 @@ final class Engine {
     // file: "PAINTSIM", then length-prefixed blocks: JSON header, canvas tiles, palette tiles, brush reservoirs, and
     // (version 2+) the packed history. Version 3 compresses with zlib, 2 with LZFSE; version 1 files (raw LZFSE tiles,
     // history inside the JSON) still load.
-    struct Header: Codable { var version = 3; var history: [Op]; var tubes: [Float]; var crop: [Float]; var medium: Int; var canvas: [Float]?; var palette: [Float]? }
+    struct Header: Codable { var version = 3; var history: [Op]; var tubes: [Float]; var crop: [Float]; var medium: Int; var canvas: [Float]?; var palette: [Float]?; var custom: Custom? }
+    // runtime-defined brushes and the ops that use them live here, not in the history block, so older versions
+    // (which ignore unknown JSON keys) open the file and replay everything else
+    struct Custom: Codable { var brushes: [BrushDef]; var at: [Int]; var ops: String }   // ops: packed history, base64; at: their places in the history
+    func usesCustom(_ op: Op) -> Bool {
+        switch op { case .stroke(let b, _), .clean(let b): return b >= builtinBrushes; default: return false }
+    }
     // the (regenerated) tooth of these tiles, TILE×TILE halves each
     func toothTiles(_ s: Surface, _ tiles: [Int]) -> MTLBuffer {
         let buf = g.buffer(tiles.count * TILE * TILE * 2)
@@ -1258,13 +1288,15 @@ final class Engine {
     func idle() { let c = g.q.makeCommandBuffer()!; flushSnaps(c); c.commit(); c.waitUntilCompleted() }
     func encode() throws -> Data {
         idle()
+        let at = history.indices.filter { usesCustom(history[$0]) }, defs = brushes.compactMap { $0.def }
+        let custom = defs.isEmpty ? nil : Custom(brushes: defs, at: at, ops: Engine.packHistory(at.map { history[$0] }).base64EncodedString())
         let h = Header(history: [], tubes: tubes.map { $0.left }, crop: [canvas.mask.x, canvas.mask.y, canvas.mask.z, canvas.mask.w], medium: medium,
                        canvas: [Float(canvas.w) / PPM, Float(canvas.h) / PPM, Float(canvas.texture)],
-                       palette: [palette.origin.x, palette.origin.y, paletteStart.x, paletteStart.y])
+                       palette: [palette.origin.x, palette.origin.y, paletteStart.x, paletteStart.y], custom: custom)
         var br = Data()
         for b in brushes { br.append(Data(bytes: b.res.contents(), count: b.res.length)) }
         let blocks = [try JSONEncoder().encode(h), surfaceData(canvas), surfaceData(palette),
-                      try (br as NSData).compressed(using: .zlib) as Data, Engine.packHistory(history)]
+                      try (br as NSData).compressed(using: .zlib) as Data, Engine.packHistory(history.filter { !usesCustom($0) })]
         var out = Data("PAINTSIM".utf8)
         out.reserveCapacity(blocks.reduce(16) { $0 + $1.count + 8 })
         for b in blocks { var n = UInt64(b.count); out.append(Data(bytes: &n, count: 8)); out.append(b) }
@@ -1291,8 +1323,18 @@ final class Engine {
         }
         if let c = h.canvas, c.count == 3 { surfaces[0] = Engine.makeCanvas(c[0], c[1], texture: Int(c[2])) }
         guard loadSurface(canvas, blocks[1], version: v), loadSurface(palette, blocks[2], version: v) else { throw CocoaError(.fileReadCorruptFile) }
+        // runtime-defined brushes come back (or are matched to ones already here) and the history is renumbered to them
+        if let c = h.custom {
+            guard let d = Data(base64Encoded: c.ops), let extra = Engine.unpackHistory(d, version: 3), extra.count == c.at.count else { throw CocoaError(.fileReadCorruptFile) }
+            for (k, i) in c.at.enumerated() { ops.insert(extra[k], at: min(i, ops.count)) }
+        }
+        let map = Array(0..<builtinBrushes) + (h.custom?.brushes ?? []).map { addBrush($0) }
+        if map != Array(0..<map.count) {
+            func m(_ b: Int) -> Int { b < map.count ? map[b] : b }
+            ops = ops.map { if case .stroke(let b, let ss) = $0 { return .stroke(brush: m(b), samples: ss) } else if case .clean(let b) = $0 { return .clean(brush: m(b)) } else { return $0 } }
+        }
         var off = 0
-        for b in brushes where off + b.res.length <= blocks[3].count {
+        for b in map.map({ brushes[$0] }) where off + b.res.length <= blocks[3].count {
             blocks[3].withUnsafeBytes { _ = memcpy(b.res.contents(), $0.baseAddress! + off, b.res.length) }
             off += b.res.length
         }
