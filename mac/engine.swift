@@ -295,6 +295,7 @@ final class Brush {
     var lie = [Float](), pressJ = [Float]()
     var pressDepth: Float = 0.62     // how far full pressure pushes the bristles down, as a fraction of their length
     var stiff: Float = 0             // defined bristles: 0 bend and drag like hair … 1 stay straight like a pad's tufts
+    var cohesion: Float = 0          // long hairs held together in one point by the paint (rigger): they don't fork
 
     init(name: String, round: Bool, width: Float, thick: Float, length: Float, n: Int, tuftR: Float, handle: V3, seed: UInt64, knife: Bool = false, pencil: Bool = false, tufts: [V4]? = nil) {
         self.name = name; self.round = round; self.width = width; self.thick = thick; self.length = length; self.n = n; self.tuftR = tuftR; self.knife = knife; self.pencil = pencil
@@ -402,7 +403,7 @@ final class Brush {
             root[j] = R
             let off3 = e1 * o.x + e2 * o.y
             let L = lens[j]
-            let jt = (dirj[j] + clumpJit[clumpOf[j]]) * (1 - stiff)
+            let jt = (dirj[j] + clumpJit[clumpOf[j]] * (1 - cohesion)) * (1 - stiff)
             let d = simd_normalize(axis * L - off3 * conv + (e1 * jt.x + e2 * jt.y) * L)
             let F = R + d * L
             if F.z >= 0 {
@@ -414,7 +415,7 @@ final class Brush {
             let ol = simd_length(outw)
             outw = ol > 1e-4 ? outw / ol : simd_normalize(dirj[j] + V2(1e-3, 0))
             let dxy = V2(d.x, d.y)
-            let splay: Float = knife ? 0 : (round ? 0.45 : 0.25) * (ol / max(width * 0.5, 0.1)) * (1 - stiff)
+            let splay: Float = knife ? 0 : (round ? 0.45 : 0.25) * (ol / max(width * 0.5, 0.1)) * (1 - stiff) * (1 - cohesion)
             var dh = dxy + outw * splay * c
             if simd_length(dh) < 1e-3 { dh = outw }
             dh = simd_normalize(dh)
@@ -422,7 +423,7 @@ final class Brush {
             // clumps and stray bristles wander sideways as they drag; edge bristles more
             let edge = min(ol / max(width * 0.5, 0.1), 1)
             let cw = noise1(travel * 0.45 + Float(clumpOf[j]) * 7.3, 1) - 0.5, tw = noise1(travel * 1.3 + Float(j) * 3.7, 2) - 0.5
-            let wander = knife ? 0 : (cw * (0.12 + 0.35 * edge * edge) * c + tw * 0.08) * (1 - stiff)
+            let wander = knife ? 0 : (cw * (0.12 + 0.35 * edge * edge) * c + tw * 0.08) * (1 - stiff) * (1 - cohesion)
             // stiff bristles don't lie down: their tips stay nearer where the straight bristle would meet the surface
             let E = simd_mix(V2(R.x, R.y) + dh * reach + V2(-dh.y, dh.x) * wander, V2(F.x, F.y), V2(repeating: stiff))
             eq[j] = E
@@ -442,6 +443,17 @@ final class Brush {
             for j in 0..<n where touching[j] { cs[clumpOf[j]] += tip[j] - eq[j]; cn[clumpOf[j]] += 1 }
             for k in cs.indices where cn[k] > 0 { cs[k] = cs[k] / cn[k] * 0.6 + m * 0.4 }
             for j in 0..<n where touching[j] { tip[j] = eq[j] + simd_mix(tip[j] - eq[j], cs[clumpOf[j]], V2(repeating: 0.6)) }
+        }
+        // cohesive hairs: tips that stray from the bundle are pulled back, within a spread that pressing widens
+        if cohesion > 0 && nt > 0 {
+            var mid = V2.zero
+            for j in 0..<n where touching[j] { mid += tip[j] }
+            mid /= Float(nt)
+            let rmax = width * (0.4 + 0.65 * pressFan)
+            for j in 0..<n where touching[j] {
+                let d = tip[j] - mid, l = simd_length(d)
+                if l > rmax { tip[j] = mid + d * (1 - cohesion * (1 - rmax / l)) }
+            }
         }
         // the part of each touching bristle that lies on the surface
         var fs: Float = 0
@@ -604,7 +616,7 @@ final class Engine {
         brushes.append(Brush(name: "Round 0", round: true, width: 0.9, thick: 0.9, length: 7, n: 30, tuftR: 0.07, handle: V3(0.50, 0.08, 0.06), seed: 1700))
         brushes.append(Brush(name: "Rigger 1", round: true, width: 1.2, thick: 1.2, length: 24, n: 50, tuftR: 0.07, handle: V3(0.12, 0.20, 0.12), seed: 1800))
         brushes.append(Brush(name: "Pencil HB", round: true, width: 0.6, thick: 0.6, length: 14, n: 1, tuftR: 0.3, handle: V3(0.06, 0.20, 0.12), seed: 1900, pencil: true))
-        brushes[7].pressDepth = 0.35; brushes[8].pressDepth = 0.18; brushes[6].pressDepth = 0.1
+        brushes[7].pressDepth = 0.35; brushes[8].pressDepth = 0.18; brushes[6].pressDepth = 0.1; brushes[8].cohesion = 1
         builtinBrushes = brushes.count
         tubes = (0..<NPIG).map { Tube($0) }
         let cmd = g.q.makeCommandBuffer()!

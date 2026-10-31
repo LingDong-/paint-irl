@@ -17,6 +17,12 @@ The [peppers standard test image](https://sipi.usc.edu/database/database.php?vol
 
 ![](screenshots/011.png)
 
-Now with OSC support! You can control the app from another software, much like how you send commands to a plotter, via OSC (Open Sound Control). See [mac/osc.swift](mac/osc.swift) comments.
+The [goldhill standard test image](https://www.hlevkin.com/hlevkin/06testimages.htm):
+
+![](screenshots/012.gif)
+
+![](screenshots/013.png)
+
+Now with OSC support! You can programmatically control/script the app from another software, much like how you send commands to a plotter, via OSC (Open Sound Control). See [mac/osc.swift](mac/osc.swift) comments.
 
 ![](screenshots/101.png)
